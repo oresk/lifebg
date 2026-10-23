@@ -1,19 +1,13 @@
 # lifebg
 
-Conway's Game of Life as a Wayland layer-shell wallpaper, written to cost the
-compositor as little as possible.
-
-The premise: an animated wallpaper costs the compositor roughly
-`frames_per_second × damaged_area`, and an animated GIF forces both to their
-worst case — 30–60 fps, whole screen, every frame. A Game of Life grid is
-mostly unchanged from one generation to the next, so this runs a few generations
-per *second* (or one every few seconds) and tells the compositor to repaint only
-the cells that actually flipped.
+Conway's Game of Life as a Wayland layer-shell wallpaper.
 
 ![lifebg running on a 4K desktop](screenshot.png)
 
-Shown: `lifebg --spawn shapes --interval 1` on a 3840×2160 desktop, one
-generation per second.
+The point is that it's cheap to composite. An animated GIF makes the compositor
+redraw the whole screen 30 to 60 times a second. A Game of Life grid is mostly
+unchanged from one generation to the next, so this runs one generation every few
+seconds and only asks the compositor to repaint the cells that actually flipped.
 
 ## Build and run
 
@@ -22,8 +16,8 @@ cargo build --release
 ./target/release/lifebg --spawn shapes --interval 1
 ```
 
-Nothing is installed and nothing is added to your session startup. Run it, and
-`pkill -x lifebg` to stop it.
+Nothing gets installed and nothing is added to your session startup. Stop it with
+`pkill -x lifebg`.
 
 ## Options
 
@@ -52,79 +46,63 @@ Nothing is installed and nothing is added to your session startup. Run it, and
     -V, --version       print the version and exit
 ```
 
-## The mode that matters: `--spawn shapes`
+## Spawn modes
 
-`--spawn noise` fills the screen with uniform random cells. It evolves, but
-after a generation or two it reads as tinted static, and — more importantly —
-dense noise changes most of the grid every generation, so there is nothing to
-clip the damage to and every frame becomes a full-surface damage anyway.
+`--spawn noise` fills the screen with random cells. It evolves, but after a
+generation or two it looks like tinted static. It's also expensive: most of the
+grid changes every generation, so there is nothing worth clipping the damage to
+and every frame ends up damaging the whole surface.
 
-`--spawn shapes` starts on an empty grid and drops recognisable Life patterns:
-gliders, LWSS, blinkers, toads, beacons, pulsars, and occasionally a Gosper
-glider gun. This is both the better-looking mode and the only one where the
-whole low-cost design actually pays off. `--list-patterns` prints the set.
+`--spawn shapes` starts on an empty grid and drops recognisable patterns —
+gliders, LWSS, blinkers, toads, beacons, pulsars, and now and then a Gosper
+glider gun. This is the one to use. It looks better, and it's the mode where
+partial damage actually does something. `--list-patterns` prints the set.
 
-## Measured damage per frame
+`--spawn mixed` does both at once. It's the current default, which is probably
+wrong, since the noise dominates and you get the worst of each.
 
-Measured with `--stats`, which reports the damaged area as a fraction of the
-surface. `--damage full` damages the entire surface every tick, so it is 100% by
-definition and serves as the baseline. Same seed, 2560×1404:
+## How the damage works
 
-| config | full-damage ticks | rects/tick | damaged | vs full |
-|---|---|---|---|---|
-| `--spawn shapes -c 14 -f 1` | 0/7 | 164 | 1.2% | **91×** |
-| `--spawn shapes -c 20 -f 1` | 0/6 | 106 | 1.3% | 77× |
-| `--spawn shapes -c 12 -f 4` | 0/24 | 248 | 1.2% | 91× |
-| `--spawn mixed -c 14 -f 1` | 2/7 | 1550 | 59.7% | 1.7× |
-| `--spawn noise -c 14 -f 1` | 1/6 | 1962 | 40.9% | 2.4× |
+Changed cells get merged into rectangles before being handed to the compositor:
+contiguous cells in a row collapse into a run, and a run in the next row with
+identical geometry extends that rectangle downward.
 
-This is damaged *area*, which is the right proxy for compositor repaint cost and
-the number that can actually be measured reliably. It is **not** an end-to-end
-GPU utilisation figure — that has never been measured, and `TODO.md` explains
-what a valid measurement would require and why it could not be done on a normal
-desktop.
+If the merged rectangles end up covering more than half the surface, or there are
+more of them than one per sixteen cells, it gives up and damages the whole
+surface instead, because at that point clipping costs more than it saves. Both
+limits are relative to the grid. An absolute rectangle count means something
+different at every resolution and cell size, and an early absolute limit of 256
+sat there quietly forcing full-surface damage for a long time before anyone
+noticed.
 
-## How the damage decision works
-
-`DamageBuilder` merges changed cells into rectangles: contiguous cells in a row
-collapse into a run, and a run in the next row with identical geometry extends
-the rectangle vertically. It then hands the list to the compositor, unless:
-
-- the merged area reaches `DAMAGE_MAX_PCT` (55%) of the surface, or
-- the list is longer than one rect per `DAMAGE_MAX_RECTS_DIVISOR` (16) cells.
-
-Both bounds are **relative**. An absolute rect-count limit means something
-different at every resolution and cell size; the original default of 256
-silently forced near-constant full-surface damage, which is how a working
-optimisation ended up looking useless.
-
-`--damage full` skips the merging entirely, for A/B comparison.
+`--damage full` skips the merging so you can compare the two. `--stats` prints
+how much of the surface each frame damages.
 
 ## Notes for whoever edits this next
 
-**Fractional scaling.** On a fractional-scaled output, Hyprland does not accept
-a layer surface sized with an integer `wl_surface.buffer_scale`. The buffer must
-be `logical_size × fractional_scale`, the logical size must be declared through
-`wp_viewport`, and a `wl_shm` buffer whose `size` is not page-aligned is
-rejected. Get any of this wrong and the compositor kills the client with a bare
-`EPIPE` and no readable protocol error. This is documented at the top of
-`src/app.rs` because it cost a whole debugging session.
+Fractional scaling. On a fractional-scaled output Hyprland will not accept a
+layer surface sized with an integer `wl_surface.buffer_scale`. The buffer has to
+be `logical_size × fractional_scale`, the logical size has to be declared through
+`wp_viewport`, and a `wl_shm` buffer whose size is not page-aligned gets
+rejected. Get any of that wrong and the compositor kills the client with a bare
+`EPIPE` and no readable protocol error. There is a longer write-up at the top of
+`src/app.rs`.
 
-**Damage coordinates are logical, not buffer coordinates.** The viewport does the
-scaling. Handing it buffer-space rectangles makes the compositor repaint the
-wrong regions and leave stale cells behind.
+Damage coordinates are logical, not buffer coordinates. The viewport does the
+scaling. Passing buffer-space rectangles makes the compositor repaint the wrong
+regions and leave stale cells behind.
 
-**Hotplug.** `sync_monitors` runs every loop iteration: new outputs get a
-surface, and surfaces whose output disappeared are dropped. One output going
-away does not take the others down.
+Hotplug. `sync_monitors` runs every loop iteration. New outputs get a surface,
+surfaces whose output disappeared get dropped, and one output going away does not
+take the others down with it.
 
 ## Layout
 
-| file | |
-|---|---|
-| `src/main.rs` | CLI, event loop, stats |
-| `src/app.rs` | Wayland: layer shell, shm buffers, damage, viewport/fractional scale |
-| `src/sim.rs` | Game of Life, pattern seeding (`#[cfg(test)]` covers the patterns) |
-| `src/paint.rs` | palette and damage-rect merging (`#[cfg(test)]` covers the merging) |
+- `src/main.rs` — CLI, event loop, stats
+- `src/app.rs` — Wayland: layer shell, shm buffers, damage, viewport and fractional scale
+- `src/sim.rs` — Game of Life and pattern seeding
+- `src/paint.rs` — palette and damage-rect merging
 
-`cargo test` runs 15 tests.
+`cargo test` runs 15 tests, covering the pattern behaviour and the rectangle
+merging.
+
