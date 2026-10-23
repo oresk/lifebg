@@ -1,0 +1,18 @@
+[package]
+name = "lifebg"
+version = "0.1.0"
+edition = "2021"
+description = "Conway's Game of Life as a Wayland layer-shell wallpaper, with per-cell damage tracking"
+license = "MIT"
+
+[dependencies]
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+libc = "0.2"
+getopts = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
