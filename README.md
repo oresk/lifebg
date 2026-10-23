@@ -10,6 +10,11 @@ mostly unchanged from one generation to the next, so this runs a few generations
 per *second* (or one every few seconds) and tells the compositor to repaint only
 the cells that actually flipped.
 
+![lifebg running on a 4K desktop](screenshot.png)
+
+Shown: `lifebg --spawn shapes --interval 1` on a 3840×2160 desktop, one
+generation per second.
+
 ## Build and run
 
 ```sh
