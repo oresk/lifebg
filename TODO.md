@@ -3,9 +3,8 @@
 ## Measure end-to-end GPU cost (not yet done)
 
 Everything this program claims to save is currently backed only by **damaged
-area**, which is a proxy. The proxy is measured and solid — see the table in
-`README.md` — but nobody has ever confirmed that less damaged area turns into
-less GPU work on real hardware.
+area**, which is a proxy. The proxy is measured, but nobody has ever confirmed
+that less damaged area turns into less GPU work on real hardware.
 
 **Why it was never measured.** Every attempt on a normal desktop produced
 nonsense: static wallpaper reading 7% then 68%, 16 gen/s cheaper than 4 gen/s,
