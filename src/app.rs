@@ -392,6 +392,7 @@ impl Monitor {
         // four sides.
         self.origin_x = outline_buf + avail_w.saturating_sub(self.gw * self.cell_buf) / 2;
         self.origin_y = outline_buf + avail_h.saturating_sub(self.gh * self.cell_buf) / 2;
+        eprintln!("lifebg: {} is {}x{} logical at {}x -> {}x{} px, grid {}x{}", self.name, w, h, f, self.bw, self.bh, self.gw, self.gh);
 
         // The viewport is what tells the compositor our logical size; the
         // buffer itself is in device pixels.
@@ -577,14 +578,40 @@ impl Monitor {
         self.pending_size.take()
     }
 
-    pub fn set_fractional_scale(&mut self, factor: u32) {
-        let f = factor as f64 / 120.0;
-        if (f - self.fscale).abs() < 0.001 || self.width == 0 {
-            self.fscale = f;
+    /// A scale change is only half of a resize. The other half is the logical
+    /// size, which arrives separately as a layer `configure`, and the two can
+    /// land in either order — Hyprland sends the configure first when you dock
+    /// or undock. So a scale change must never overwrite a pending size with the
+    /// size we happen to be built at: doing that re-queued the *old* logical
+    /// size, which is how the wallpaper ended up short of the screen edge after
+    /// undocking.
+    fn queue_reallocation(&mut self) {
+        if self.width != 0 {
+            self.pending_size.get_or_insert((self.width, self.height));
+        }
+    }
+
+    fn set_scale(&mut self, f: f64) {
+        if (f - self.fscale).abs() < 0.001 {
             return;
         }
         self.fscale = f;
-        self.pending_size = Some((self.width, self.height));
+        self.queue_reallocation();
+    }
+
+    pub fn set_fractional_scale(&mut self, factor: u32) {
+        self.set_scale(factor as f64 / 120.0);
+    }
+
+    /// The integer `wl_output.scale`, acted on only by compositors that do not
+    /// advertise `wp_fractional_scale_v1`. Where the fractional object exists it
+    /// is authoritative: Hyprland rounds `wl_output.scale` *up*, so 1.875
+    /// arrives here as 2 and would ask for a buffer bigger than the screen.
+    pub fn set_integer_scale(&mut self, factor: i32) {
+        if self._fractional.is_some() {
+            return;
+        }
+        self.set_scale(factor.max(1) as f64);
     }
 
     pub fn frame_is_stale(&self) -> bool {
@@ -696,7 +723,15 @@ impl Dispatch<WlOutput, usize> for App {
         let Some(info) = app.outputs.get_mut(*idx) else { return };
         match event {
             OutputEvent::Name { name } => info.name = name,
-            OutputEvent::Scale { factor } => info.scale = factor.max(1),
+            OutputEvent::Scale { factor } => {
+                info.scale = factor.max(1);
+                // A scale change on an output we are already drawing on. Only
+                // meaningful for surfaces without a fractional-scale object;
+                // `set_integer_scale` ignores the rest.
+                for m in app.monitors.iter_mut().filter(|m| m.out_idx == *idx) {
+                    m.set_integer_scale(factor.max(1));
+                }
+            }
             OutputEvent::Done => info.done = true,
             _ => {}
         }
