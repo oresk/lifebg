@@ -38,7 +38,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::{
     Anchor, Event as LayerEvent, ZwlrLayerSurfaceV1,
 };
 
-use crate::paint::{self, DamageBuilder, Palette, Rect};
+use crate::paint::{self, DamageBuilder, DamageGeom, Palette, Rect};
 use crate::sim::{Life, SimCfg};
 
 /// If the merged damage covers this fraction of the surface, clipping to it
@@ -528,9 +528,7 @@ impl Monitor {
             self.force_full = false;
             return None;
         }
-        let f = self.fscale.max(0.5);
-        let (dox, doy) = ((self.origin_x as f64 / f).floor() as i32, (self.origin_y as f64 / f).floor() as i32);
-        let mut db = DamageBuilder::new(self.cell, dox, doy);
+        let mut db = DamageBuilder::new(DamageGeom { ox: self.origin_x, oy: self.origin_y, cell: self.cell_buf, scale: self.fscale.max(0.5) });
         for &(gx, gy, _) in changes.iter() {
             db.cell_changed(gx as usize, gy as usize);
         }

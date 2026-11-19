@@ -92,6 +92,14 @@ Damage coordinates are logical, not buffer coordinates. The viewport does the
 scaling. Passing buffer-space rectangles makes the compositor repaint the wrong
 regions and leave stale cells behind.
 
+The damage lattice also has to be the *painted* one, which is not the requested
+cell size: `cell × scale` is rounded to whole buffer pixels, so the real logical
+pitch is `cell_buf ÷ scale`. At 1.875× a 20px cell is really 20.27 logical px
+wide, and rectangles built from 20 drift 24px by the right edge of the screen —
+the compositor is never told about the changes that matter and the grid rots in
+place. `DamageGeom` carries buffer geometry plus the scale so the two cannot
+disagree.
+
 Hotplug. `sync_monitors` runs every loop iteration. New outputs get a surface,
 surfaces whose output disappeared get dropped, and one output going away does not
 take the others down with it.

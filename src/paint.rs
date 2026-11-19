@@ -42,6 +42,40 @@ pub fn color_of(alive: bool, p: &Palette) -> Rgb {
     }
 }
 
+/// Where the grid sits in buffer (device) pixels, plus the scale that turns
+/// those into the surface coordinates damage is expressed in.
+///
+/// The damage lattice has to be the *painted* lattice, which is not the same
+/// thing as the requested one. `cell * scale` is rounded to whole buffer pixels,
+/// so at a fractional scale the true logical pitch is `cell_buf / scale` and not
+/// `cell`. At 1.875x with a 20px cell that is 20.2667, and by the ninetieth
+/// column rectangles built from `cell` have drifted 24 pixels away from the
+/// cells they were meant to cover: the compositor is never told about the real
+/// changes, so dead cells stay lit and the grid rots in place.
+#[derive(Clone, Copy, Debug)]
+pub struct DamageGeom {
+    /// Grid origin in buffer pixels.
+    pub ox: usize,
+    pub oy: usize,
+    /// Cell pitch in buffer pixels.
+    pub cell: usize,
+    /// Buffer pixels per surface (logical) pixel.
+    pub scale: f64,
+}
+
+impl DamageGeom {
+    /// Inclusive leading edge of slot `g` in surface pixels, rounded outward.
+    fn edge(&self, origin: usize, g: usize) -> i32 {
+        ((origin + g * self.cell) as f64 / self.scale).floor() as i32
+    }
+
+    /// Exclusive trailing edge after slot `g`, rounded outward so the rectangle
+    /// always covers the whole slot however the rounding fell.
+    fn edge_after(&self, origin: usize, g: usize) -> i32 {
+        ((origin + (g + 1) * self.cell) as f64 / self.scale).ceil() as i32
+    }
+}
+
 /// Accumulates changed cells into merged rectangles.
 ///
 /// Cells must be offered in row-major order. Horizontally adjacent changes
@@ -55,22 +89,17 @@ pub struct DamageBuilder {
     /// Runs of the previous row that are still extendable, keyed by geometry.
     open: Vec<(usize, usize, usize)>, // (rect index, start_gx, end_gx)
     cur_row: Option<usize>,
-    cell: usize,
-    /// Grid origin in surface coordinates, so damage lines up with the outline.
-    ox: i32,
-    oy: i32,
+    geom: DamageGeom,
 }
 
 impl DamageBuilder {
-    pub fn new(cell: usize, ox: i32, oy: i32) -> Self {
+    pub fn new(geom: DamageGeom) -> Self {
         DamageBuilder {
             rects: Vec::with_capacity(64),
             runs: Vec::with_capacity(32),
             open: Vec::with_capacity(32),
             cur_row: None,
-            cell,
-            ox,
-            oy,
+            geom,
         }
     }
 
@@ -112,17 +141,18 @@ impl DamageBuilder {
         // origin. Deliberately a superset of what is painted: it absorbs the
         // rounding differences between logical and buffer coordinates, and the
         // few extra pixels of gap cost nothing.
-        let y = (gy * self.cell) as i32 + self.oy;
-        let size = self.cell as i32;
+        let y = self.geom.edge(self.geom.oy, gy);
+        let y_end = self.geom.edge_after(self.geom.oy, gy);
+        let size = y_end - y;
 
         let mut next_open = Vec::with_capacity(self.runs.len());
         for &(start, end) in self.runs.iter() {
-            let w = ((end - start) * self.cell) as i32;
-            let x = (start * self.cell) as i32 + self.ox;
+            let x = self.geom.edge(self.geom.ox, start);
+            let w = self.geom.edge_after(self.geom.ox, end - 1) - x;
 
             if let Some(pos) = self.open.iter().position(|&(_, s, e)| s == start && e == end) {
                 let (idx, _, _) = self.open.remove(pos);
-                self.rects[idx].h += self.cell as i32;
+                self.rects[idx].h = y_end - self.rects[idx].y;
                 next_open.push((idx, start, end));
                 continue;
             }
@@ -167,7 +197,7 @@ mod tests {
     /// Feed a set of `(gx, gy)` cells in the row-major order the builder
     /// requires, then finish with bounds loose enough not to interfere.
     fn build(cells: &[(usize, usize)], cell: usize) -> Option<Vec<Rect>> {
-        let mut db = DamageBuilder::new(cell, 0, 0);
+        let mut db = DamageBuilder::new(DamageGeom { ox: 0, oy: 0, cell, scale: 1.0 });
         let mut cells = cells.to_vec();
         cells.sort_by_key(|&(x, y)| (y, x));
         for &(x, y) in &cells {
@@ -215,7 +245,7 @@ mod tests {
     #[test]
     fn origin_offsets_every_rect() {
         // This is what keeps damage aligned when --outline moves the grid.
-        let mut db = DamageBuilder::new(10, 7, 5);
+        let mut db = DamageBuilder::new(DamageGeom { ox: 7, oy: 5, cell: 10, scale: 1.0 });
         db.cell_changed(0, 0);
         db.cell_changed(1, 0);
         assert_eq!(db.finish(100_000_000, 55, 4096).unwrap(), vec![Rect { x: 7, y: 5, w: 20, h: 10 }]);
@@ -224,13 +254,13 @@ mod tests {
     #[test]
     fn damage_over_the_area_budget_falls_back_to_full() {
         // 4 cells x 100px^2 = 400 of a 500px surface = 80% > 55%.
-        let mut db = DamageBuilder::new(10, 0, 0);
+        let mut db = DamageBuilder::new(DamageGeom { ox: 0, oy: 0, cell: 10, scale: 1.0 });
         for c in 0..4 {
             db.cell_changed(c, 0);
         }
         assert_eq!(db.finish(500, 55, 4096), None);
         // Same list against a big enough surface is fine.
-        let mut db = DamageBuilder::new(10, 0, 0);
+        let mut db = DamageBuilder::new(DamageGeom { ox: 0, oy: 0, cell: 10, scale: 1.0 });
         for c in 0..4 {
             db.cell_changed(c, 0);
         }
@@ -248,10 +278,49 @@ mod tests {
                 }
             }
         }
-        let mut db = DamageBuilder::new(10, 0, 0);
+        let mut db = DamageBuilder::new(DamageGeom { ox: 0, oy: 0, cell: 10, scale: 1.0 });
         for (x, y) in cells {
             db.cell_changed(x, y);
         }
         assert_eq!(db.finish(100_000_000, 55, 10), None, "cap of 10 should be exceeded");
+    }
+
+    /// The regression. At a fractional scale the pitch the client actually paints
+    /// is `cell_buf / scale`, not the requested `cell`, and the damage has to
+    /// follow the painted pitch. Building it from `cell` instead drifts further
+    /// and further right, and by the far side of the screen the rectangles cover
+    /// nothing that changed — dead cells stayed lit and the grid rotted in place
+    /// on a 1.875x panel.
+    #[test]
+    fn damage_follows_the_painted_pitch_at_a_fractional_scale() {
+        // 20 logical px at 1.875x rounds to a 38px buffer pitch, so a cell is
+        // really 20.2667 logical px wide, not 20.
+        let mut db = DamageBuilder::new(DamageGeom { ox: 191, oy: 191, cell: 38, scale: 1.875 });
+        db.cell_changed(90, 0);
+        let rects = db.finish(100_000_000, 55, 4096).unwrap();
+        assert_eq!(rects, vec![Rect { x: 1925, y: 101, w: 22, h: 22 }]);
+
+        // Stated as the invariant that matters: the rectangle has to cover the
+        // buffer slot the cell was painted into, once both are in surface space.
+        let r = &rects[0];
+        let slot_start = (191 + 90 * 38) as f64 / 1.875;
+        let slot_end = (191 + 91 * 38) as f64 / 1.875;
+        assert!(r.x as f64 <= slot_start, "damage starts at {}, the cell starts at {slot_start}", r.x);
+        assert!((r.x + r.w) as f64 >= slot_end, "damage ends at {}, the cell ends at {slot_end}", r.x + r.w);
+    }
+
+    /// A vertical merge has to keep covering the rows it absorbed, which means
+    /// re-deriving the height from the slot edges rather than adding one pitch.
+    #[test]
+    fn a_vertical_merge_covers_every_row_it_absorbed() {
+        let mut db = DamageBuilder::new(DamageGeom { ox: 191, oy: 191, cell: 38, scale: 1.875 });
+        for gy in 0..3 {
+            db.cell_changed(90, gy);
+        }
+        let rects = db.finish(100_000_000, 55, 4096).unwrap();
+        assert_eq!(rects.len(), 1, "identical runs should merge");
+        let r = &rects[0];
+        assert_eq!(r.y, (191.0_f64 / 1.875).floor() as i32);
+        assert!((r.y + r.h) as f64 >= (191 + 3 * 38) as f64 / 1.875, "merge lost the bottom row");
     }
 }
